@@ -1,0 +1,5 @@
+<launch>
+
+    <node pkg="rviz" type="rviz" name="display_result" output="screen" args="-d $(find localization)/config/itri.rviz" />
+
+</launch>

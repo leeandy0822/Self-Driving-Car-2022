@@ -1,0 +1,8 @@
+prefix=/root/catkin_ws/devel
+
+Name: map_tile_loader
+Description: Description of map_tile_loader
+Version: 0.0.0
+Cflags: 
+Libs: -L${prefix}/lib 
+Requires: 
