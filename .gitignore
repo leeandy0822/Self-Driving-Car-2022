@@ -2,4 +2,7 @@
 *.vscode
 build/
 *.pcd
+*.zip
+build/
+
 

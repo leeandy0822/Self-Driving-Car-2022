@@ -17,7 +17,9 @@
 #include<pcl_conversions/pcl_conversions.h>
 #include<pcl_ros/transforms.h>
 #include <pcl/filters/passthrough.h>
-
+#include <nav_msgs/Odometry.h>
+#include <geometry_msgs/Vector3.h>
+#include<sensor_msgs/Imu.h>
 
 class Localizer{
 private:
@@ -26,13 +28,18 @@ private:
   std::vector<float> d_max_list, n_iter_list;
 
   ros::NodeHandle _nh;
-  ros::Subscriber sub_map, sub_points, sub_gps;
+  ros::Subscriber sub_map, sub_points, sub_gps, sub_odom,sub_imu;
   ros::Publisher pub_points, pub_pose;
   tf::TransformBroadcaster br;
 
   pcl::PointCloud<pcl::PointXYZI>::Ptr map_points;
   pcl::PointXYZ gps_point;
-  bool gps_ready = false, map_ready = false, initialied = false;
+  nav_msgs::Odometry car_odom;
+  geometry_msgs::Vector3 car_lin_vel;
+  geometry_msgs::Vector3 car_lin_acc;
+  geometry_msgs::Vector3 car_ang_vel;
+
+  bool gps_ready = false, map_ready = false, odom_ready = false, imu_ready = false,  initialied = false;
   Eigen::Matrix4f init_guess;
   int cnt = 0;
   
@@ -43,7 +50,8 @@ private:
   std::ofstream outfile;
   geometry_msgs::Transform car2Lidar;
   std::string mapFrame, lidarFrame;
-
+  double now_time = ros::Time::now().toSec();  
+  double time_delay = 0;
 
 public:
   Localizer(ros::NodeHandle nh): map_points(new pcl::PointCloud<pcl::PointXYZI>) {
@@ -64,7 +72,7 @@ public:
     // ROS_INFO("Origin map cloud size:  %ld", map->points.size());
 
 
-    ROS_INFO("saving results to %s", result_save_path.c_str());
+    ROS_INFO("localization2 saving results to %s", result_save_path.c_str());
     outfile.open(result_save_path);
     outfile << "id,x,y,z,yaw,pitch,roll" << std::endl;
 
@@ -83,11 +91,12 @@ public:
     sub_map = _nh.subscribe("/map", 1, &Localizer::map_callback, this);
     sub_points = _nh.subscribe("/lidar_points", 400, &Localizer::pc_callback, this);
     sub_gps = _nh.subscribe("/gps", 1, &Localizer::gps_callback, this);
+    sub_odom = _nh.subscribe("/wheel_odometry", 1, &Localizer::odom_callback, this);
+    sub_imu = _nh.subscribe("/imu/data", 1, &Localizer::imu_callback, this);
     pub_points = _nh.advertise<sensor_msgs::PointCloud2>("/transformed_points", 1);
     pub_pose = _nh.advertise<geometry_msgs::PoseStamped>("/lidar_pose", 1);
 
     init_guess.setIdentity();
-
 
     ROS_INFO("%s initialized", ros::this_node::getName().c_str());
   }
@@ -102,34 +111,50 @@ public:
     pcl::fromROSMsg(*msg, *map_points);
     map_ready = true;
 
+    ROS_INFO("Got map message");
+    pcl::fromROSMsg(*msg, *map_points);
+    map_ready = true;
+
     pcl::PassThrough<pcl::PointXYZI> pass_x;
     pass_x.setInputCloud (map_points);
     pass_x.setFilterFieldName ("x");
-    pass_x.setFilterLimits (1500, 1800);
+    pass_x.setFilterLimits (1400, 1900);
     pass_x.filter (*map_points);
 
     pcl::PassThrough<pcl::PointXYZI> pass_y;
     pass_y.setInputCloud (map_points);
     pass_y.setFilterFieldName ("y");
-    pass_y.setFilterLimits (850, 1100);
+    pass_y.setFilterLimits (800, 1200);
     pass_y.filter (*map_points);
 
     pcl::PassThrough<pcl::PointXYZI> pass_z;
     pass_z.setInputCloud (map_points);
     pass_z.setFilterFieldName ("z");
-    pass_z.setFilterLimits (1, 10);
+    pass_z.setFilterLimits (0, 9);
     pass_z.filter (*map_points);
-
+    
     ROS_INFO("Map point cloud size:  %ld", map_points->points.size());
   }
-  
+  void odom_callback(const nav_msgs::Odometry::ConstPtr& msg){
+    ROS_INFO("Got odometry message");
+    car_lin_vel = msg->twist.twist.linear;
+    car_ang_vel = msg->twist.twist.angular;
+    odom_ready = true;
+    return;
+  }
+  void imu_callback(const sensor_msgs::Imu::ConstPtr& msg){
+    ROS_INFO("Got imu message");
+    car_lin_acc = msg->linear_acceleration;
+    imu_ready = true;
+    return;
+  }
   void pc_callback(const sensor_msgs::PointCloud2::ConstPtr& msg){
     ROS_INFO("Got lidar message");
     pcl::PointCloud<pcl::PointXYZI>::Ptr scan_ptr(new pcl::PointCloud<pcl::PointXYZI>);
     Eigen::Matrix4f result;
 
-    while(!(gps_ready & map_ready)){
-      ROS_WARN("waiting for map and gps data ...");
+    while(!(gps_ready & map_ready & odom_ready & imu_ready)){
+      ROS_WARN("waiting for map, gps and odom data ...");
       ros::Duration(0.05).sleep();
       ros::spinOnce();
     }
@@ -233,7 +258,7 @@ public:
     pcl::PassThrough<pcl::PointXYZI> pass3;
     pass3.setInputCloud(scan_points);
     pass3.setFilterFieldName("z");
-    pass3.setFilterLimits(1.5, 7.5);
+    pass3.setFilterLimits(1, 8);
     pass3.filter(*filtered_scan_ptr);
 
     // // set voxel filter 
@@ -262,7 +287,7 @@ public:
         icp.setMaximumIterations(5000);
         icp.setTransformationEpsilon (1e-12);
         icp.setMaxCorrespondenceDistance (1);
-        icp.setEuclideanFitnessEpsilon (1e-6);
+        icp.setEuclideanFitnessEpsilon (1e-7);
         icp.setRANSACOutlierRejectionThreshold (0.05);
 
         pcl::PointCloud<pcl::PointXYZI> Final;
@@ -285,16 +310,27 @@ public:
       return init_guess;
     }
 	
+	
 	/* [Part 2] Perform ICP here or any other scan-matching algorithm */
 	/* Refer to https://pointclouds.org/documentation/classpcl_1_1_iterative_closest_point.html#details */
   
+  Eigen::Vector3f translation_dt;
+  Eigen::Vector3f translation_ddt;
+  translation_dt << car_lin_vel.x, car_lin_vel.y, 0;
+  translation_ddt << car_lin_acc.x, car_lin_acc.y, 0;
+  Eigen::Vector3f translation_drift = translation_dt*0.05 + 0.5*translation_ddt*0.05*0.05;
+  std::cout << "Translation Drift" << translation_drift << std::endl;
+
+  // update initial guess
+  init_guess.block<3,1>(0,3) = init_guess.block<3,1>(0,3) + translation_drift;
+
   icp.setInputSource (filtered_scan_ptr);
   icp.setInputTarget (map_points);
-  icp.setMaximumIterations(4000);
+  icp.setMaximumIterations(2000);
   icp.setTransformationEpsilon (1e-12);
-  icp.setMaxCorrespondenceDistance (1);
+  icp.setMaxCorrespondenceDistance (1.4);
   icp.setEuclideanFitnessEpsilon (1e-6);
-  icp.setRANSACOutlierRejectionThreshold (0.05);
+  icp.setRANSACOutlierRejectionThreshold (0.01);
 
   pcl::PointCloud<pcl::PointXYZI> Final;
   icp.align(Final, init_guess);
@@ -305,7 +341,6 @@ public:
 	/* Use result as next initial guess */
   init_guess = result;
   return result;
-
   }
 };
 
